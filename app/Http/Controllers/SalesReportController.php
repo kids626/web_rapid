@@ -11,10 +11,20 @@ class SalesReportController extends Controller
     {
         // 讀取查詢關鍵字（使用者輸入的型號或產品名稱），去除前後空白
         $keyword = trim($request->get('q', ''));
+        // 若未提供關鍵字：從產品檔取最近更新的前 10 筆型號作為預設清單（以 data_timestamp DESC）
+        $topProdNos = [];
         if ($keyword === '') {
-            // 若未提供關鍵字：從產品檔取最近更新的一筆型號作為預設值（以 data_timestamp DESC）
-            $defaultProdNo = DB::table('product_m')->orderBy('data_timestamp', 'desc')->value('prod_no');
-            $keyword = $defaultProdNo ? (string) $defaultProdNo : '';
+            // 建立預設型號清單陣列（未輸入關鍵字時使用）
+            // 指定來源資料表：產品主檔 product_m
+            $topProdNos = DB::table('product_m')
+                // 依最後更新時間由新到舊排序，確保取到最新商品
+                ->orderBy('data_timestamp', 'desc')
+                // 只取前 10 筆做為預設查詢清單
+                ->limit(10)
+                // 只擷取欄位 prod_no（型號），回傳為集合
+                ->pluck('prod_no')
+                // 轉換為 PHP 陣列，方便後續 whereIn 使用
+                ->toArray();
         }
         // 讀取查詢的開始日期（YYYY-MM-DD）
         $start = $request->get('start_date');
@@ -50,6 +60,10 @@ class SalesReportController extends Controller
             ->when($end, function ($q) use ($end) {
                 $q->whereDate('m.ord_date2', '<=', $end);
             })
+            // 若無關鍵字，改為帶入前 10 個型號做為 whereIn 篩選
+            ->when($keyword === '' && !empty($topProdNos), function ($q) use ($topProdNos) {
+                $q->whereIn('p.prod_no', $topProdNos);
+            })
             // 若提供關鍵字：對型號或產品名稱進行模糊比對
             ->when($keyword !== '', function ($q) use ($keyword) {
                 $q->where(function ($qq) use ($keyword) {
@@ -71,6 +85,7 @@ class SalesReportController extends Controller
             'keyword' => $keyword,
             'start' => $start,
             'end' => $end,
+            'autoProdNos' => $topProdNos,
         ]);
     }
 
@@ -165,6 +180,118 @@ class SalesReportController extends Controller
             'chartLabels' => $labels,
             'chartCurrent' => $chartCurrent,
             'chartPrev' => $chartPrev,
+        ]);
+    }
+
+    public function yearly(Request $request)
+    {
+        // 讀取年度區間，若未提供則預設顯示近三年（含今年）
+        $startYear = (int) ($request->get('start_year') ?: 2019);
+        $endYear = (int) ($request->get('end_year') ?: date('Y'));
+
+        // 轉換為日期區間：起始 >= yyyy-01-01 00:00:00，結束 < (endYear+1)-01-01 00:00:00
+        $startDate = $startYear . '-01-01 00:00:00';
+        $endExclusive = ($endYear + 1) . '-01-01 00:00:00';
+
+        $rows = DB::table('order_m as m')
+            ->join('order_d as d', 'd.ord_no', '=', 'm.ord_no')
+            ->select([
+                DB::raw('YEAR(m.create_date) AS y'),
+                DB::raw('SUM(COALESCE(d.qty,0) * COALESCE(d.price,0)) AS total_amount'),
+            ])
+            ->where('m.order_kind', '<>', '99')
+            ->where('m.cancel_flag', 0)
+            ->whereIn('m.io_kind', ['1', '2'])
+            ->where('m.create_date', '>=', $startDate)
+            ->where('m.create_date', '<', $endExclusive)
+            ->groupBy(DB::raw('YEAR(m.create_date)'))
+            ->orderBy('y')
+            ->get();
+
+        // 準備圖表資料
+        $labels = [];
+        $data = [];
+        foreach ($rows as $r) {
+            $labels[] = (string) $r->y;
+            $data[] = (float) $r->total_amount;
+        }
+
+        return view('sales.yearly', [
+            'rows' => $rows,
+            'startYear' => $startYear,
+            'endYear' => $endYear,
+            'chartLabels' => $labels,
+            'chartData' => $data,
+        ]);
+    }
+
+    public function topMonthly(Request $request)
+    {
+        $start = $request->get('start_date');
+        $end = $request->get('end_date');
+
+        if (!$start && !$end) {
+            $start = date('Y-01-01');
+            $end = date('Y-m-d');
+        }
+
+        $query = DB::table('order_m as m')
+            ->join('order_d as d', 'd.ord_no', '=', 'm.ord_no')
+            ->join('product_m as p', 'p.prod_no', '=', 'd.prod_no')
+            ->select([
+                DB::raw("DATE_FORMAT(m.create_date, '%Y-%m') AS ym"),
+                'p.prod_no',
+                'p.prod_name',
+                DB::raw('SUM(COALESCE(d.qty,0)) AS total_qty'),
+                DB::raw('SUM(COALESCE(d.qty,0) * COALESCE(d.price,0)) AS total_amount'),
+            ])
+            ->where('m.order_kind', '<>', '99')
+            ->where('m.cancel_flag', 0)
+            ->whereIn('m.io_kind', ['1', '2'])
+            ->when($start, function ($q) use ($start) {
+                $q->where('m.create_date', '>=', $start . ' 00:00:00');
+            })
+            ->when($end, function ($q) use ($end) {
+                $q->where('m.create_date', '<=', $end . ' 23:59:59');
+            })
+            ->groupBy(DB::raw("DATE_FORMAT(m.create_date, '%Y-%m')"), 'p.prod_no', 'p.prod_name')
+            ->orderBy('ym')
+            ->orderByRaw('SUM(COALESCE(d.qty,0) * COALESCE(d.price,0)) DESC');
+
+        $rows = $query->get();
+
+        // 依月份分組並取各月前 10 名
+        $tops = [];
+        foreach ($rows as $r) {
+            $ym = $r->ym;
+            if (!isset($tops[$ym])) {
+                $tops[$ym] = [];
+            }
+            if (count($tops[$ym]) < 10) {
+                $tops[$ym][] = $r;
+            }
+        }
+
+        // 為顯示加入排名
+        $ranked = [];
+        foreach ($tops as $ym => $list) {
+            $rank = 1;
+            foreach ($list as $item) {
+                $ranked[] = (object) [
+                    'ym' => $ym,
+                    'rank' => $rank++,
+                    'prod_no' => $item->prod_no,
+                    'prod_name' => $item->prod_name,
+                    'total_qty' => $item->total_qty,
+                    'total_amount' => $item->total_amount,
+                ];
+            }
+        }
+
+        return view('sales.top_monthly', [
+            'rows' => $ranked,
+            'start' => $start,
+            'end' => $end,
         ]);
     }
 
