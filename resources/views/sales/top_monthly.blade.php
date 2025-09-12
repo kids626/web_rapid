@@ -8,6 +8,8 @@
     <style>
         .container { max-width: 1080px; }
         .table thead th { white-space: nowrap; }
+        .table-hover tbody tr:hover { background-color: #fffbe6; }
+        .table tbody tr.group-alt { background-color: #f6f9ff; }
     </style>
 </head>
 <body>
@@ -34,7 +36,7 @@
     </form>
 
     <div class="table-responsive">
-        <table class="table table-striped table-bordered">
+        <table class="table table-bordered table-hover">
             <thead class="thead-light">
                 <tr>
                     <th>月份</th>
@@ -47,7 +49,7 @@
             </thead>
             <tbody>
                 @forelse ($rows as $row)
-                <tr>
+                <tr class="{{ intdiv($loop->iteration - 1, 10) % 2 ? 'group-alt' : '' }}">
                     <td>{{ $row->ym }}</td>
                     <td class="text-right">{{ $row->rank }}</td>
                     <td>{{ $row->prod_no }}</td>

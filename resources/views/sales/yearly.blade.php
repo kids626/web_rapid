@@ -13,19 +13,8 @@
 <body>
 <div class="container mt-4">
     <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="mb-0">年度銷售額彙總</h3>
-        <div>
-            <div class="dropdown d-inline-block">
-                <button class="btn btn-outline-secondary dropdown-toggle" type="button" id="reportMenu" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">切換報表</button>
-                <div class="dropdown-menu dropdown-menu-right" aria-labelledby="reportMenu">
-                    <a class="dropdown-item" href="{{ route('sales.report') }}">商品彙總（型號/名稱）</a>
-                    <a class="dropdown-item" href="{{ route('sales.report.product_monthly') }}">產品-月份彙總</a>
-                    <a class="dropdown-item" href="{{ route('sales.report.monthly') }}">每月銷售額彙總</a>
-                    <a class="dropdown-item" href="{{ route('sales.report.tickets') }}">票券彙總</a>
-                    <a class="dropdown-item active" href="{{ route('sales.report.yearly') }}">年度銷售額彙總</a>
-                </div>
-            </div>
-        </div>
+        <h3 class="mb-0">每月銷售額彙總</h3>
+        @include('sales.partials.menu')
     </div>
 
     <form method="get" action="{{ route('sales.report.yearly') }}" class="mb-4">

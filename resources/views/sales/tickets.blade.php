@@ -12,6 +12,7 @@
         #usedModal .modal-dialog { max-width: 95%; }
         /* 放大未用票券清單對話框寬度 */
         #notUsedModal .modal-dialog { max-width: 95%; }
+        .table-hover tbody tr:hover { background-color: #fffbe6; }
     </style>
 </head>
 <body>
@@ -21,36 +22,49 @@
         @include('sales.partials.menu')
     </div>
 
-    <form method="get" action="{{ route('sales.report.tickets') }}" class="mb-4">
-        <div class="form-row">
-            <div class="col-md-3 mb-2">
-                <label>型號/產品名稱</label>
-                <input type="text" name="q" value="{{ $keyword ?? '' }}" class="form-control" placeholder="輸入型號或產品名稱">
-            </div>
-            <div class="col-md-3 mb-2">
-                <label>日期欄位</label>
-                <select name="date_field" class="form-control">                    
-                    <option value="create_time" {{ $dateField==='create_time' ? 'selected' : '' }}>票卷建立時間(create_time)</option>
-                    <!-- <option value="use_date" {{ $dateField==='use_date' ? 'selected' : '' }}>票券使用時間(use_date)</option> -->
-                </select>
-            </div>
-            <div class="col-md-3 mb-2">
-                <label>開始日期</label>
-                <input type="date" name="start_date" value="{{ $start }}" class="form-control">
-            </div>
-            <div class="col-md-3 mb-2">
-                <label>結束日期</label>
-                <input type="date" name="end_date" value="{{ $end }}" class="form-control">
-            </div>
-            
-            <div class="col-md-3 mb-2 align-self-end">
-                <button type="submit" class="btn btn-primary">查詢</button>
-            </div>
+    <div class="card mb-4">
+        <div class="card-body py-3">
+            <form method="get" action="{{ route('sales.report.tickets') }}">
+                <div class="form-row align-items-end">
+                    <div class="col-md-4 mb-2">
+                        <label>型號/產品名稱</label>
+                        <input type="text" name="q" value="{{ $keyword ?? '' }}" class="form-control" placeholder="輸入型號或產品名稱">
+                    </div>
+                    <div class="col-md-4 mb-2">
+                        <label>店家</label>
+                        <select name="fac_no" class="form-control">
+                            <option value="">全部店家</option>
+                            @foreach(($stores ?? []) as $s)
+                                <option value="{{ $s->fac_no }}" {{ (!empty($facNo) && $facNo==$s->fac_no) ? 'selected' : '' }}>{{ $s->store_name }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div class="col-md-4 mb-2">
+                        <label>日期欄位</label>
+                        <select name="date_field" class="form-control">                    
+                            <option value="create_time" {{ $dateField==='create_time' ? 'selected' : '' }}>票卷建立時間(create_time)</option>
+                            <!-- <option value="use_date" {{ $dateField==='use_date' ? 'selected' : '' }}>票券使用時間(use_date)</option> -->
+                        </select>
+                    </div>
+                    <div class="col-md-3 mb-2">
+                        <label>開始日期</label>
+                        <input type="date" name="start_date" value="{{ $start }}" class="form-control">
+                    </div>
+                    <div class="col-md-3 mb-2">
+                        <label>結束日期</label>
+                        <input type="date" name="end_date" value="{{ $end }}" class="form-control">
+                    </div>
+                    <div class="col-md-6 mb-2 text-right">
+                        <button type="submit" class="btn btn-primary">查詢</button>
+                        <a href="{{ route('sales.report.tickets') }}" class="btn btn-light">清除</a>
+                    </div>
+                </div>
+            </form>
         </div>
-    </form>
+    </div>
 
     <div class="table-responsive">
-        <table class="table table-striped table-bordered">
+        <table class="table table-striped table-bordered table-hover">
             <thead class="thead-light">
                 <tr>
                     <th>月份</th>
@@ -97,11 +111,14 @@
       </div>
       <div class="modal-body">
         <div class="table-responsive">
-          <table class="table table-sm table-bordered">
+          <table class="table table-sm table-bordered table-hover">
             <thead class="thead-light">
               <tr>
+                <th>編號</th>
                 <th>店家名</th>
                 <th>店家編號</th>
+                <th>訂單號</th>
+                <th>會員編號</th>
                 <th>型號</th>
                 <th>產品名稱</th>
                 <th>update_user</th>
@@ -111,7 +128,7 @@
               </tr>
             </thead>
             <tbody id="usedListBody">
-              <tr><td colspan="8" class="text-center text-muted">載入中...</td></tr>
+              <tr><td colspan="11" class="text-center text-muted">載入中...</td></tr>
             </tbody>
           </table>
         </div>
@@ -134,11 +151,14 @@
       </div>
       <div class="modal-body">
         <div class="table-responsive">
-          <table class="table table-sm table-bordered">
+          <table class="table table-sm table-bordered table-hover">
             <thead class="thead-light">
               <tr>
+                <th>編號</th>
                 <th>店家名</th>
                 <th>店家編號</th>
+                <th>訂單號</th>
+                <th>會員編號</th>
                 <th>型號</th>
                 <th>產品名稱</th>
                 <th>update_user</th>
@@ -148,7 +168,7 @@
               </tr>
             </thead>
             <tbody id="notUsedListBody">
-              <tr><td colspan="8" class="text-center text-muted">載入中...</td></tr>
+              <tr><td colspan="11" class="text-center text-muted">載入中...</td></tr>
             </tbody>
           </table>
         </div>
@@ -169,18 +189,21 @@ $(function(){
     var ym = $(this).data('ym');
     var prodNo = $(this).data('prodno');
     var $tbody = $('#usedListBody');
-    $tbody.html('<tr><td colspan="6" class="text-center text-muted">載入中...</td></tr>');
+    $tbody.html('<tr><td colspan="11" class="text-center text-muted">載入中...</td></tr>');
     $('#usedModal').modal('show');
-    $.get("{{ route('sales.report.tickets.used_list') }}", { ym: ym, prod_no: prodNo }, function(resp){
+    $.get("{{ route('sales.report.tickets.used_list') }}", { ym: ym, prod_no: prodNo, fac_no: $('select[name=\'fac_no\']').val() }, function(resp){
       var rows = resp.data || [];
       if (!rows.length) {
-        $tbody.html('<tr><td colspan="6" class="text-center text-muted">查無資料</td></tr>');
+        $tbody.html('<tr><td colspan="11" class="text-center text-muted">查無資料</td></tr>');
         return;
       }
-      var html = rows.map(function(r){
+      var html = rows.map(function(r, idx){
         return '<tr>'+
+               '<td>'+(idx+1)+'</td>'+
                '<td>'+(r.store_name||'')+'</td>'+
                '<td>'+(r.fac_no||'')+'</td>'+
+               '<td>'+(r.ord_no||'')+'</td>'+
+               '<td>'+(r.mb_no||'')+'</td>'+
                '<td>'+(r.prod_no||'')+'</td>'+
                '<td>'+(r.prod_name||'')+'</td>'+
                '<td>'+(r.update_user||'')+'</td>'+
@@ -198,18 +221,21 @@ $(function(){
     var ym = $(this).data('ym');
     var prodNo = $(this).data('prodno');
     var $tbody = $('#notUsedListBody');
-    $tbody.html('<tr><td colspan="6" class="text-center text-muted">載入中...</td></tr>');
+    $tbody.html('<tr><td colspan="11" class="text-center text-muted">載入中...</td></tr>');
     $('#notUsedModal').modal('show');
-    $.get("{{ route('sales.report.tickets.not_used_list') }}", { ym: ym, prod_no: prodNo }, function(resp){
+    $.get("{{ route('sales.report.tickets.not_used_list') }}", { ym: ym, prod_no: prodNo, fac_no: $('select[name=\'fac_no\']').val() }, function(resp){
       var rows = resp.data || [];
       if (!rows.length) {
-        $tbody.html('<tr><td colspan="6" class="text-center text-muted">查無資料</td></tr>');
+        $tbody.html('<tr><td colspan="11" class="text-center text-muted">查無資料</td></tr>');
         return;
       }
-      var html = rows.map(function(r){
+      var html = rows.map(function(r, idx){
         return '<tr>'+
+               '<td>'+(idx+1)+'</td>'+
                '<td>'+(r.store_name||'')+'</td>'+
                '<td>'+(r.fac_no||'')+'</td>'+
+               '<td>'+(r.ord_no||'')+'</td>'+
+               '<td>'+(r.mb_no||'')+'</td>'+
                '<td>'+(r.prod_no||'')+'</td>'+
                '<td>'+(r.prod_name||'')+'</td>'+
                '<td>'+(r.update_user||'')+'</td>'+

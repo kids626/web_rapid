@@ -8,6 +8,7 @@
     <style>
         .container { max-width: 1080px; }
         .table thead th { white-space: nowrap; }
+        .table-hover tbody tr:hover { background-color: #fffbe6; }
         #page-loader {
             position: fixed;
             top: 0; left: 0; right: 0; bottom: 0;
@@ -27,7 +28,7 @@
 </div>
 <div class="container mt-4">
     <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="mb-0">銷售額/數量查詢(請搜尋型號或產品名稱)</h3>
+        <h3 class="mb-0">目前至今銷售額/數量查詢(請搜尋型號或產品名稱)</h3>
         @include('sales.partials.menu')
     </div>
 
@@ -52,7 +53,7 @@
     </form>
 
     <div class="table-responsive">
-        <table class="table table-striped table-bordered">
+        <table class="table table-striped table-bordered table-hover">
             <thead class="thead-light">
                 <tr>
                     <th>型號</th>
@@ -89,7 +90,7 @@ document.addEventListener('DOMContentLoaded', function () {
         if (loader) loader.style.display = 'none';
     });
     // 送出查詢表單時顯示載入中
-    var form = document.querySelector('form[action="{{ route('sales.report') }}"]') || document.querySelector('form');
+    var form = document.querySelector(`form[action="{{ route('sales.report') }}"]`) || document.querySelector('form');
     if (form) {
         form.addEventListener('submit', function () {
             if (loader) loader.style.display = 'flex';

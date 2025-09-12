@@ -7,6 +7,14 @@ use Illuminate\Support\Facades\DB;
 
 class SalesReportController extends Controller
 {
+    /**
+     * 需排除的型號清單 目前使用在每月Top10產品
+     */
+    private function excludedProdNos(): array
+    {
+        return ['EMA-001', 'EM-002', 'EM-003','point','EMAC-0027','EMAC-0039','EM-001'];
+    }
+
     public function index(Request $request)
     {
         // 讀取查詢關鍵字（使用者輸入的型號或產品名稱），去除前後空白
@@ -229,6 +237,7 @@ class SalesReportController extends Controller
     {
         $start = $request->get('start_date');
         $end = $request->get('end_date');
+        $excluded = $this->excludedProdNos();
 
         if (!$start && !$end) {
             $start = date('Y-01-01');
@@ -248,6 +257,7 @@ class SalesReportController extends Controller
             ->where('m.order_kind', '<>', '99')
             ->where('m.cancel_flag', 0)
             ->whereIn('m.io_kind', ['1', '2'])
+            ->whereNotIn('p.prod_no', $excluded)
             ->when($start, function ($q) use ($start) {
                 $q->where('m.create_date', '>=', $start . ' 00:00:00');
             })
@@ -256,7 +266,7 @@ class SalesReportController extends Controller
             })
             ->groupBy(DB::raw("DATE_FORMAT(m.create_date, '%Y-%m')"), 'p.prod_no', 'p.prod_name')
             ->orderBy('ym')
-            ->orderByRaw('SUM(COALESCE(d.qty,0) * COALESCE(d.price,0)) DESC');
+            ->orderByRaw('SUM(COALESCE(d.qty,0)) DESC');
 
         $rows = $query->get();
 
@@ -304,6 +314,8 @@ class SalesReportController extends Controller
         $end = $request->get('end_date');
         // 讀取查詢關鍵字（用於型號/產品名稱的模糊比對）
         $keyword = trim($request->get('q', ''));
+        // 讀取店家編號（下拉值 fac_no，顯示為店家名稱）
+        $facNo = trim($request->get('fac_no', ''));
         // 白名單限制日期欄位，避免被任意指定造成 SQL 注入風險
         $dateField = $dateField === 'create_time' ? 'create_time' : 'use_date';
 
@@ -334,8 +346,12 @@ class SalesReportController extends Controller
             ])
             // 訂單狀態過濾：排除非銷售/取消，僅統計銷出與退貨類別 1、2
             ->where('m.order_kind', '<>', '99')
-            ->where('m.cancel_flag', 0)
+            //->where('m.cancel_flag', 0)
             ->whereIn('m.io_kind', ['1', '2'])
+            // 店家過濾（依票券核銷店家編號）
+            ->when($facNo !== '', function ($q) use ($facNo) {
+                $q->where('t.check_fac_no', $facNo);
+            })
             // 型號/產品名稱模糊查詢（q 參數）
             ->when($keyword !== '', function ($q) use ($keyword) {
                 $q->where(function ($qq) use ($keyword) {
@@ -360,18 +376,27 @@ class SalesReportController extends Controller
         // 執行查詢：目前未提供日期也會取完整結果（可視需求改為 limit）
         $rows = ($start || $end) ? $query->get() : $query->get();
 
+        // 店家下拉清單
+        $stores = DB::table('store_tb')
+            ->select(['fac_no', 'store_name'])
+            ->orderBy('store_name')
+            ->get();
+
         return view('sales.tickets', [
             'rows' => $rows,
             'start' => $start,
             'end' => $end,
             'dateField' => $dateField,
             'keyword' => $keyword,
+            'facNo' => $facNo,
+            'stores' => $stores,
         ]);
     }
 
     public function productMonthly(Request $request)
     {
         $keyword = trim($request->get('q', ''));        
+        $excluded = $this->excludedProdNos();
 
         $start = $request->get('start_date');
         $end = $request->get('end_date');
@@ -395,6 +420,7 @@ class SalesReportController extends Controller
             ->where('m.order_kind', '<>', '99')
             ->where('m.cancel_flag', 0)
             ->whereIn('m.io_kind', ['1', '2'])
+            ->whereNotIn('p.prod_no', $excluded)
             ->when($start, function ($q) use ($start) {
                 $q->where('m.create_date', '>=', $start . ' 00:00:00');
             })
@@ -425,6 +451,7 @@ class SalesReportController extends Controller
     {
         $ym = $request->get('ym');
         $prodNo = $request->get('prod_no');
+        $facNo = $request->get('fac_no');
 
         if (!$ym || !$prodNo) {
             return response()->json(['data' => []]);
@@ -442,10 +469,15 @@ class SalesReportController extends Controller
             ->where('t.status', '1')
             ->where('t.prod_no', $prodNo)
             ->whereBetween(DB::raw("STR_TO_DATE(t.create_time, '%Y-%m-%d %H:%i:%s')"), [$start, $end])
+            ->when(!empty($facNo), function($q) use ($facNo) {
+                $q->where('t.check_fac_no', $facNo);
+            })
             ->select([
                 DB::raw('s.store_name as store_name'),
                 DB::raw('s.fac_no as fac_no'),
                 DB::raw('t.update_user as update_user'),
+                DB::raw('m.ord_no as ord_no'),
+                DB::raw('m.mb_no as mb_no'),
                 DB::raw('m.mb_name as mb_name'),
                 DB::raw('t.create_time as create_time'),
                 DB::raw('FROM_UNIXTIME(t.use_date) as use_date'),
@@ -463,6 +495,7 @@ class SalesReportController extends Controller
     {
         $ym = $request->get('ym');
         $prodNo = $request->get('prod_no');
+        $facNo = $request->get('fac_no');
 
         if (!$ym || !$prodNo) {
             return response()->json(['data' => []]);
@@ -479,10 +512,15 @@ class SalesReportController extends Controller
             ->where('t.status', '0')
             ->where('t.prod_no', $prodNo)
             ->whereBetween(DB::raw("STR_TO_DATE(t.create_time, '%Y-%m-%d %H:%i:%s')"), [$start, $end])
+            ->when(!empty($facNo), function($q) use ($facNo) {
+                $q->where('t.check_fac_no', $facNo);
+            })
             ->select([
                 DB::raw('COALESCE(s.store_name, "") as store_name'),
                 DB::raw('COALESCE(s.fac_no, "") as fac_no'),
                 DB::raw('COALESCE(t.update_user, "") as update_user'),
+                DB::raw('COALESCE(m.ord_no, "") as ord_no'),
+                DB::raw('COALESCE(m.mb_no, "") as mb_no'),
                 DB::raw('COALESCE(m.mb_name, "") as mb_name'),
                 DB::raw('COALESCE(t.create_time, "") as create_time'),
                 DB::raw('COALESCE(t.use_date, "") as use_date'),
@@ -490,6 +528,7 @@ class SalesReportController extends Controller
                 DB::raw('COALESCE(p.prod_name, "") as prod_name'),
             ])
             ->orderBy('s.store_name');
+        //ddSql($query);        
         $rows = $query->get();
 
         return response()->json(['data' => $rows]);
