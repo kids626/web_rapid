@@ -58,17 +58,23 @@
 
     <div class="mt-4">
         <h5>年度銷售額長條圖</h5>
+        <div id="yearlyChartData" data-labels='@json($chartLabels ?? [])' data-series='@json($chartData ?? [])' style="display:none"></div>
         <canvas id="yearlyChart" height="120"></canvas>
     </div>
 </div>
 
 <script src="https://code.jquery.com/jquery-3.6.0.slim.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@2.9.4/dist/Chart.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
 <script>
 (function(){
-  var labels = @json($chartLabels ?? []);
-  var data = @json($chartData ?? []);
+  var dataEl = document.getElementById('yearlyChartData');
+  var labels = [];
+  var data = [];
+  if (dataEl) {
+    try { labels = JSON.parse(dataEl.dataset.labels || '[]'); } catch(e) { labels = []; }
+    try { data = JSON.parse(dataEl.dataset.series || '[]'); } catch(e) { data = []; }
+  }
   if (!labels.length) return;
   var ctx = document.getElementById('yearlyChart').getContext('2d');
   new Chart(ctx, {
@@ -81,9 +87,8 @@
     },
     options: {
       responsive: true,
-      scales: { yAxes: [{ ticks: { beginAtZero: true } }] },
-      tooltips: { mode: 'index', intersect: false },
-      legend: { display: false }
+      scales: { y: { beginAtZero: true } },
+      plugins: { tooltip: { mode: 'index', intersect: false }, legend: { display: false } }
     }
   });
 })();

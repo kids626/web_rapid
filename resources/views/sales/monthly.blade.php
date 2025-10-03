@@ -75,20 +75,51 @@
 
     <div class="mt-4">
         <h5>今年 vs 去年同月 銷售額比較</h5>
+        <div id="salesChartData" data-labels='@json($chartLabels ?? [])' data-current='@json($chartCurrent ?? [])' data-prev='@json($chartPrev ?? [])' style="display:none"></div>
         <canvas id="salesChart" height="120"></canvas>
     </div>
 </div>
 
 <script src="https://code.jquery.com/jquery-3.6.0.slim.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@2.9.4/dist/Chart.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
 <script>
 (function(){
-  var labels = @json($chartLabels ?? []);
-  var current = @json($chartCurrent ?? []);
-  var prev = @json($chartPrev ?? []);
+  var dataEl = document.getElementById('salesChartData');
+  var labels = [];
+  var current = [];
+  var prev = [];
+  if (dataEl) {
+    try { labels = JSON.parse(dataEl.dataset.labels || '[]'); } catch(e) { labels = []; }
+    try { current = JSON.parse(dataEl.dataset.current || '[]'); } catch(e) { current = []; }
+    try { prev = JSON.parse(dataEl.dataset.prev || '[]'); } catch(e) { prev = []; }
+  }
   if (!labels.length) return;
   var ctx = document.getElementById('salesChart').getContext('2d');
+  // 自訂插件：在長條頂端標出數值
+  var barValuePlugin = {
+    id: 'barValue',
+    afterDatasetsDraw: function(chart){
+      var ctx2 = chart.ctx;
+      ctx2.save();
+      (chart.data.datasets || []).forEach(function(ds, di){
+        var meta = chart.getDatasetMeta(di);
+        (meta.data || []).forEach(function(el, idx){
+          var v = ds.data && ds.data[idx];
+          if (v == null) return;
+          var p = el.tooltipPosition();
+          var txt = String(Number(v).toLocaleString());
+          ctx2.font = 'bold 11px sans-serif';
+          ctx2.fillStyle = '#333';
+          ctx2.textAlign = 'center';
+          ctx2.textBaseline = 'bottom';
+          var x = p.x, y = p.y - 4; // 上方略縮
+          ctx2.fillText(txt, x, y);
+        });
+      });
+      ctx2.restore();
+    }
+  };
   new Chart(ctx, {
     type: 'bar',
     data: {
@@ -101,11 +132,14 @@
     options: {
       responsive: true,
       scales: {
-        yAxes: [{ ticks: { beginAtZero: true } }]
+        y: { beginAtZero: true }
       },
-      tooltips: { mode: 'index', intersect: false },
-      legend: { position: 'top' }
-    }
+      plugins: {
+        tooltip: { mode: 'index', intersect: false },
+        legend: { position: 'top' }
+      }
+    },
+    plugins: [barValuePlugin]
   });
 })();
 </script>

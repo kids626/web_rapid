@@ -10,15 +10,37 @@ class SalesReportController extends Controller
     /**
      * 需排除的型號清單 目前使用在每月Top10產品
      */
-    private function excludedProdNos(): array
+    
+     private function hasChinese($str)
+    {// 判斷關鍵字是否包含中文字元（用於決定是否以產品名稱進行模糊查詢）
+        return preg_match("/[\x{4e00}-\x{9fff}]/u", $str);
+    }
+
+    private function excludedProdNos()
     {
         return ['EMA-001', 'EM-002', 'EM-003','point','EMAC-0027','EMAC-0039','EM-001'];
     }
 
     public function index(Request $request)
-    {
+    {//目前至今銷售額/數量查詢(請搜尋型號或產品名稱)
+        
+               
         // 讀取查詢關鍵字（使用者輸入的型號或產品名稱），去除前後空白
         $keyword = trim($request->get('q', ''));
+        // 紀錄最近搜尋關鍵字於 session（前 10 筆，最新在前）
+        $recentKeywords = (array) $request->session()->get('sales.report.recent_keywords', []);
+        if ($keyword !== '') {
+            $recentKeywords = array_values(array_unique(array_merge([$keyword], $recentKeywords)));
+            if (count($recentKeywords) > 10) {
+                $recentKeywords = array_slice($recentKeywords, 0, 10);
+            }
+            $request->session()->put('sales.report.recent_keywords', $recentKeywords);
+        }
+
+        
+        
+        
+        $byDetail = (bool) $request->get('by_detail', false);
         // 若未提供關鍵字：從產品檔取最近更新的前 10 筆型號作為預設清單（以 data_timestamp DESC）
         $topProdNos = [];
         if ($keyword === '') {
@@ -39,53 +61,323 @@ class SalesReportController extends Controller
         // 讀取查詢的結束日期（YYYY-MM-DD）
         $end = $request->get('end_date');
 
-        // 建立彙總查詢：以訂單明細 d 為主，關聯產品 p 與訂單主檔 m
-        $query = DB::table('order_d as d')
-            // 關聯產品檔，取得型號與產品名稱
-            ->join('product_m as p', 'p.prod_no', '=', 'd.prod_no')
-            // 關聯訂單主檔，用於日期與訂單狀態過濾
-            ->join('order_m as m', 'm.ord_no', '=', 'd.ord_no')
-            // 選取要顯示／彙總的欄位
-            ->select([
-                'p.prod_no',
-                'p.prod_name',
-                // 銷售數量：合計明細數量，空值以 0 代入
-                DB::raw('SUM(COALESCE(d.qty, 0)) as total_qty'),
-                // 銷售額：優先採用明細小計 sub_money；若無則以 qty*price 計算
-                DB::raw('SUM(COALESCE(d.sub_money, COALESCE(d.qty,0) * COALESCE(d.price,0))) as total_amount'),
-            ])
-            // 排除非銷售訂單
-            ->where('m.order_kind', '<>', '99')
-            // 排除已取消訂單
-            ->where('m.cancel_flag', 0)
-            // 僅統計 io_kind 在 1、2 範圍（銷出/退貨等業務定義）
-            ->whereIn('m.io_kind', ['1', '2'])
-            // 若有開始日期：以 m.ord_date2 作為起始過濾（含當日）
-            ->when($start, function ($q) use ($start) {
-                $q->whereDate('m.ord_date2', '>=', $start);
-            })
-            // 若有結束日期：以 m.ord_date2 作為結束過濾（含當日）
-            ->when($end, function ($q) use ($end) {
-                $q->whereDate('m.ord_date2', '<=', $end);
-            })
-            // 若無關鍵字，改為帶入前 10 個型號做為 whereIn 篩選
-            ->when($keyword === '' && !empty($topProdNos), function ($q) use ($topProdNos) {
-                $q->whereIn('p.prod_no', $topProdNos);
-            })
-            // 若提供關鍵字：對型號或產品名稱進行模糊比對
-            ->when($keyword !== '', function ($q) use ($keyword) {
-                $q->where(function ($qq) use ($keyword) {
-                    $qq->where('p.prod_no', 'like', "%{$keyword}%")
-                       ->orWhere('p.prod_name', 'like', "%{$keyword}%");
-                });
-            })
-            // 依型號＋產品名稱進行彙總（避免名稱相同但型號不同的紀錄被合併）
-            ->groupBy('p.prod_no', 'p.prod_name')
-            // 以型號排序，讓結果穩定
-            ->orderBy('p.prod_no');
+        // 建立彙總查詢
+        if ($byDetail) {
+            // 依細項商品（order_dd.detail_prod_no）彙總（僅數量）- 僅 join order_m，不 join order_d
+            // 贈品數量：以 order_gift_d 依 prod_no 加總，左連接至細項彙總
+            // has_subtype：判斷該細項型號所屬之訂單，是否存在任何主檔 order_d 帶有 subtype（依日期條件）
+            $subtypeExistsSub = DB::table('order_dd as dd2')
+                ->join('order_m as sm', 'sm.ord_no', '=', 'dd2.ord_no')
+                ->join('order_d as sd', 'sd.ord_no', '=', 'dd2.ord_no')
+                ->select(DB::raw('dd2.detail_prod_no as detail_prod_no'))
+                ->whereNotIn('sm.order_kind', ['98','99'])
+                ->where('sm.cancel_flag', 0)
+                ->whereIn('sm.io_kind', ['1', '2'])
+                ->whereNotNull('sd.subtype')
+                ->where('sd.subtype', '<>', '')
+                ->where('sd.subtype', '<>', '-1')
+                ->when($start, function ($q) use ($start) {
+                    $q->whereDate('sm.ord_date2', '>=', $start);
+                })
+                ->when($end, function ($q) use ($end) {
+                    $q->whereDate('sm.ord_date2', '<=', $end);
+                })
+                ->groupBy('dd2.detail_prod_no');
+                
+            $giftSub = DB::table('order_gift_d as gd')
+                ->join('order_m as m2', 'm2.ord_no', '=', 'gd.ord_no')
+                ->select('gd.prod_no', DB::raw('SUM(COALESCE(gd.qty,0)) AS gift_qty'))
+                ->whereNotIn('m2.order_kind', ['98','99'])
+                ->where('m2.cancel_flag', 0)
+                ->whereIn('m2.io_kind', ['1', '2'])
+                ->when($start, function ($q) use ($start) {
+                    $q->whereDate('m2.ord_date2', '>=', $start);
+                })
+                ->when($end, function ($q) use ($end) {
+                    $q->whereDate('m2.ord_date2', '<=', $end);
+                })
+                ->groupBy('gd.prod_no');
+
+            // 獎勵數量（order_kind=98，依細項商品彙總）
+            $rewardSub = DB::table('order_dd as rdd')
+                ->join('order_m as rm', 'rm.ord_no', '=', 'rdd.ord_no')
+                ->select(DB::raw('rdd.detail_prod_no as prod_no'), DB::raw('SUM(COALESCE(rdd.qty,0)) AS reward_qty'))
+                ->where('rm.order_kind', '98')
+                ->where('rm.cancel_flag', 0)
+                ->whereIn('rm.io_kind', ['1', '2'])
+                ->when($start, function ($q) use ($start) {
+                    $q->whereDate('rm.ord_date2', '>=', $start);
+                })
+                ->when($end, function ($q) use ($end) {
+                    $q->whereDate('rm.ord_date2', '<=', $end);
+                })
+                ->groupBy('rdd.detail_prod_no');
+
+            // 未領取獎勵數（moneypv_award.create_order IS NULL）
+            $unclaimedAwardSub = DB::table('moneypv_award as aw')
+                ->select([
+                    DB::raw('aw.prod_no as prod_no'),
+                    DB::raw('SUM(COALESCE(aw.qty,0)) AS unclaimed_qty'),
+                ])
+                ->whereNull('aw.create_order')                
+                ->groupBy('aw.prod_no');
+
+            // 銷售數量（不含98/99）彙總
+            $salesAgg = DB::table('order_dd as sdd')
+                ->join('order_m as sm1', 'sm1.ord_no', '=', 'sdd.ord_no')
+                ->select(DB::raw('sdd.detail_prod_no as prod_no'), DB::raw('SUM(COALESCE(sdd.qty,0)) AS total_qty'))
+                ->whereNotIn('sm1.order_kind', ['98','99'])
+                ->where('sm1.cancel_flag', 0)
+                ->whereIn('sm1.io_kind', ['1', '2'])
+                ->when($start, function ($q) use ($start) {
+                    $q->whereDate('sm1.ord_date2', '>=', $start);
+                })
+                ->when($end, function ($q) use ($end) {
+                    $q->whereDate('sm1.ord_date2', '<=', $end);
+                })
+                ->groupBy('sdd.detail_prod_no');
+
+            // 鍵集合：非98/99 銷售鍵 UNION 98 獎勵鍵
+            $keysNon98 = DB::table('order_dd as dd0')
+                ->join('order_m as m0', 'm0.ord_no', '=', 'dd0.ord_no')
+                ->whereNotIn('m0.order_kind', ['98','99'])
+                ->where('m0.cancel_flag', 0)
+                ->whereIn('m0.io_kind', ['1', '2'])
+                ->when($start, function ($q) use ($start) {
+                    $q->whereDate('m0.ord_date2', '>=', $start);
+                })
+                ->when($end, function ($q) use ($end) {
+                    $q->whereDate('m0.ord_date2', '<=', $end);
+                })
+                ->select(DB::raw('dd0.detail_prod_no as detail_prod_no'))
+                ->groupBy('dd0.detail_prod_no');
+
+            $keys98 = DB::table('order_dd as ddr')
+                ->join('order_m as mr', 'mr.ord_no', '=', 'ddr.ord_no')
+                ->where('mr.order_kind', '98')
+                ->where('mr.cancel_flag', 0)
+                ->whereIn('mr.io_kind', ['1', '2'])
+                ->when($start, function ($q) use ($start) {
+                    $q->whereDate('mr.ord_date2', '>=', $start);
+                })
+                ->when($end, function ($q) use ($end) {
+                    $q->whereDate('mr.ord_date2', '<=', $end);
+                })
+                ->select(DB::raw('ddr.detail_prod_no as detail_prod_no'))
+                ->groupBy('ddr.detail_prod_no');
+
+            // 只有未領取獎勵也能出現：加入 moneypv_award 的型號
+            $keysUnclaimed = DB::table('moneypv_award as akw')
+                ->select(DB::raw('akw.prod_no as detail_prod_no'))
+                ->whereNull('akw.create_order')                
+                ->groupBy('akw.prod_no');
+
+            $keysUnion = $keysNon98->union($keys98)->union($keysUnclaimed);
+
+            $query = DB::query()
+                ->fromSub($keysUnion, 'k')
+                ->leftJoin('product_m as pd', 'pd.prod_no', '=', 'k.detail_prod_no')
+                ->leftJoinSub($salesAgg, 'sale', function ($j) {
+                    $j->on('sale.prod_no', '=', 'k.detail_prod_no');
+                })
+                ->leftJoinSub($giftSub, 'gft', function ($j) {
+                    $j->on('gft.prod_no', '=', 'k.detail_prod_no');
+                })
+                ->leftJoinSub($rewardSub, 'rwd', function ($j) {
+                    $j->on('rwd.prod_no', '=', 'k.detail_prod_no');
+                })
+                ->leftJoinSub($unclaimedAwardSub, 'urw', function ($j) {
+                    $j->on('urw.prod_no', '=', 'k.detail_prod_no');
+                })
+                ->leftJoinSub($subtypeExistsSub, 'st', function ($j) {
+                    $j->on('st.detail_prod_no', '=', 'k.detail_prod_no');
+                })
+                ->select([
+                    DB::raw('k.detail_prod_no as prod_no'),
+                    DB::raw('COALESCE(pd.prod_name, "") as prod_name'),
+                    DB::raw('COALESCE(sale.total_qty, 0) as total_qty'),
+                    DB::raw('COALESCE(gft.gift_qty, 0) as gift_qty'),
+                    DB::raw('COALESCE(rwd.reward_qty, 0) as reward_qty'),
+                    DB::raw('COALESCE(urw.unclaimed_qty, 0) as unclaimed_qty'),
+                    DB::raw('COALESCE(sale.total_qty,0) + COALESCE(gft.gift_qty,0) + COALESCE(rwd.reward_qty,0) + COALESCE(urw.unclaimed_qty,0) as total_qty_with_gift'),
+                    DB::raw('0 as total_amount'),
+                    DB::raw('CASE WHEN st.detail_prod_no IS NULL THEN 0 ELSE 1 END as has_subtype'),
+                ])
+                ->when($keyword !== '', function ($q) use ($keyword) {
+                    $q->where(function ($qq) use ($keyword) {
+                        if ($this->hasChinese($keyword)) {
+                            $qq->orWhere('pd.prod_name', 'like', "%{$keyword}%");
+                        } else {
+                            $qq->where('k.detail_prod_no', 'like', "%{$keyword}%");
+                        }
+                    });
+                })
+                ->groupBy('k.detail_prod_no', 'pd.prod_name', 'sale.total_qty', 'gft.gift_qty', 'rwd.reward_qty', 'urw.unclaimed_qty', 'st.detail_prod_no')
+                ->orderBy('k.detail_prod_no');
+        } else {
+            // 依主商品（order_d.prod_no）彙總
+            $query = DB::table('order_d as d')
+                // 關聯產品檔，取得型號與產品名稱
+                ->join('product_m as p', 'p.prod_no', '=', 'd.prod_no')
+                // 關聯訂單主檔，用於日期與訂單狀態過濾
+                ->join('order_m as m', 'm.ord_no', '=', 'd.ord_no')
+                // 選取要顯示／彙總的欄位
+                ->select([
+                    'p.prod_no',
+                    'p.prod_name',
+                    // 銷售數量：合計明細數量，空值以 0 代入
+                    DB::raw('SUM(COALESCE(d.qty, 0)) as total_qty'),
+                    // 銷售額：優先採用明細小計 sub_money；若無則以 qty*price 計算
+                    DB::raw('SUM(COALESCE(d.sub_money, COALESCE(d.qty,0) * COALESCE(d.price,0))) as total_amount'),
+                    DB::raw("MAX(CASE WHEN COALESCE(d.subtype,'') <> '' AND d.subtype <> '-1' THEN 1 ELSE 0 END) as has_subtype"),
+                ])
+                // 排除非銷售訂單
+                ->whereNotIn('m.order_kind', ['98','99'])
+                // 排除已取消訂單
+                ->where('m.cancel_flag', 0)
+                // 僅統計 io_kind 在 1、2 範圍（銷出/退貨等業務定義）
+                ->whereIn('m.io_kind', ['1', '2'])
+                // 若有開始日期：以 m.ord_date2 作為起始過濾（含當日）
+                ->when($start, function ($q) use ($start) {
+                    $q->whereDate('m.ord_date2', '>=', $start);
+                })
+                // 若有結束日期：以 m.ord_date2 作為結束過濾（含當日）
+                ->when($end, function ($q) use ($end) {
+                    $q->whereDate('m.ord_date2', '<=', $end);
+                })
+                //--------------------------------
+                // 注意這裡的判斷-若無關鍵字且無日期篩選，帶入前 10 個型號做為 whereIn 篩選
+                ->when($keyword === '' && !$start && !$end && !empty($topProdNos), function ($q) use ($topProdNos) {
+                    $q->whereIn('p.prod_no', $topProdNos);
+                })
+                // 若提供關鍵字：對型號或產品名稱進行模糊比對
+                ->when($keyword !== '', function ($q) use ($keyword) {
+                    $q->where(function ($qq) use ($keyword) {
+                        if ($this->hasChinese($keyword)) {
+                            $qq->orWhere('p.prod_name', 'like', "%{$keyword}%");
+                        }
+                        else
+                        {
+                            $qq->where('p.prod_no', 'like', "%{$keyword}%");
+                        }
+                    });
+                })
+                // 依型號＋產品名稱進行彙總（避免名稱相同但型號不同的紀錄被合併）
+                ->groupBy('p.prod_no', 'p.prod_name')
+                // 以型號排序，讓結果穩定
+                ->orderBy('p.prod_no');
+        }
 
         // 若有提供日期區間：回傳完整結果；否則預設僅取前 5 筆示例
+        //ddSql($query);
         $rows = ($start || $end) ? $query->get() : $query->limit(5)->get();
+
+        // 準備「今天 / 昨天」產品銷售量圖表資料
+        $today = date('Y-m-d');
+        $yesterday = date('Y-m-d', strtotime('-1 day'));
+
+        // 熱門關鍵字：依產品主檔最近更新順序
+        $hotList = DB::table('product_m')
+            ->select(['prod_no', 'prod_name'])
+            ->orderBy('data_timestamp', 'desc')
+            ->limit(5)
+            ->get();
+        $hotKeywords = [];
+        foreach ($hotList as $r) {
+            $prodNo = (string)($r->prod_no ?? '');
+            $prodName = trim((string)($r->prod_name ?? ''));
+            $label = $prodNo !== '' && $prodName !== '' ? ($prodNo . ' (' . $prodName . ')') : ($prodNo ?: $prodName);
+            if ($label === '') continue;
+            $hotKeywords[] = ['label' => $label, 'value' => $prodNo !== '' ? $prodNo : $prodName];
+        }
+
+        $buildDailyChart = function(string $targetDate) use ($byDetail) {
+            $excluded = $this->excludedProdNos();
+            if ($byDetail) {
+                // 贈品數量（依細項商品、單日）
+                $giftSub = DB::table('order_gift_d as gd')
+                    ->join('order_m as m2', 'm2.ord_no', '=', 'gd.ord_no')
+                    ->select('gd.prod_no', DB::raw('SUM(COALESCE(gd.qty,0)) AS gift_qty'))
+                    ->whereNotIn('m2.order_kind', ['98','99'])
+                    ->where('m2.cancel_flag', 0)
+                    ->whereIn('m2.io_kind', ['1', '2'])
+                    ->whereDate('m2.ord_date2', '=', $targetDate)
+                    ->groupBy('gd.prod_no');
+
+                $q = DB::table('order_dd as dd')
+                    ->join('order_m as m', 'm.ord_no', '=', 'dd.ord_no')
+                    ->leftJoin('product_m as pd', 'pd.prod_no', '=', 'dd.detail_prod_no')
+                    ->leftJoinSub($giftSub, 'gft', function ($j) {
+                        $j->on('gft.prod_no', '=', 'dd.detail_prod_no');
+                    })
+                    ->select([
+                        DB::raw('dd.detail_prod_no as prod_no'),
+                        DB::raw('COALESCE(pd.prod_name, "") as prod_name'),
+                        DB::raw('SUM(COALESCE(dd.qty,0)) as qty'),
+                        DB::raw('COALESCE(MAX(gft.gift_qty), 0) as gift_qty'),
+                    ])
+                    ->whereNotIn('m.order_kind', ['98','99'])
+                    ->where('m.cancel_flag', 0)
+                    ->whereIn('m.io_kind', ['1', '2'])
+                    ->whereNotIn('dd.detail_prod_no', $excluded)
+                    ->whereDate('m.ord_date2', '=', $targetDate)
+                    ->groupBy('dd.detail_prod_no', 'pd.prod_name')
+                    ->orderBy('dd.detail_prod_no');
+            } else {
+                $q = DB::table('order_m as m')
+                    ->join('order_d as d', 'd.ord_no', '=', 'm.ord_no')
+                    ->join('product_m as p', 'p.prod_no', '=', 'd.prod_no')
+                    ->select([
+                        'p.prod_no',
+                        'p.prod_name',
+                        DB::raw('SUM(COALESCE(d.qty,0)) as qty'),
+                    ])
+                    ->whereNotIn('m.order_kind', ['98','99'])
+                    ->where('m.cancel_flag', 0)
+                    ->whereIn('m.io_kind', ['1', '2'])
+                    ->whereNotIn('p.prod_no', $excluded)
+                    ->whereDate('m.ord_date2', '=', $targetDate)
+                    ->groupBy('p.prod_no', 'p.prod_name')
+                    ->orderBy('p.prod_no');
+            }
+
+            $list = $q->get();
+
+            $agg = [];
+            foreach ($list as $r) {
+                $prodNo = (string) ($r->prod_no ?? '');
+                if ($prodNo === '') continue;
+                if (!isset($agg[$prodNo])) {
+                    $agg[$prodNo] = [
+                        'prod_no' => $prodNo,
+                        'prod_name' => (string) ($r->prod_name ?? ''),
+                        'qty' => 0.0,
+                    ];
+                }
+                $baseQty = (float) ($r->qty ?? 0);
+                $giftQty = isset($r->gift_qty) ? (float) $r->gift_qty : 0.0;
+                $agg[$prodNo]['qty'] += ($byDetail ? ($baseQty + $giftQty) : $baseQty);
+            }
+
+            $arr = array_values($agg);
+            usort($arr, function($a, $b){ return $b['qty'] <=> $a['qty']; });
+            $top = $arr; // 顯示全部產品
+
+            $labels = [];
+            $data = [];
+            $rank = 1;
+            foreach ($top as $it) {
+                $labelBase = trim($it['prod_no'] . ($it['prod_name'] !== '' ? ('(' . $it['prod_name'] . ')') : ''));
+                $labels[] = $rank . '. ' . ($labelBase !== '' ? $labelBase : $it['prod_no']);
+                $data[] = (float) $it['qty'];
+                $rank++;
+            }
+
+            return [$labels, $data];
+        };
+
+        list($chartTodayLabels, $chartTodayData) = $buildDailyChart($today);
+        list($chartYesterdayLabels, $chartYesterdayData) = $buildDailyChart($yesterday);
 
         // 將結果與查詢條件回傳到 Blade 視圖
         return view('sales.report', [
@@ -94,11 +386,100 @@ class SalesReportController extends Controller
             'start' => $start,
             'end' => $end,
             'autoProdNos' => $topProdNos,
+            'byDetail' => $byDetail,
+            'chartTodayLabels' => $chartTodayLabels,
+            'chartTodayData' => $chartTodayData,
+            'chartYesterdayLabels' => $chartYesterdayLabels,
+            'chartYesterdayData' => $chartYesterdayData,
+            'todayDate' => $today,
+            'yesterdayDate' => $yesterday,
+            'hotKeywords' => $hotKeywords,
+            'recentKeywords' => $recentKeywords,
+        ]);
+    }
+
+    public function subtypeBreakdown(Request $request)
+    {
+        $prodNo = trim($request->get('prod_no', ''));
+        if ($prodNo === '') {
+            return response()->json(['ok' => false, 'message' => '缺少型號'], 400);
+        }
+        $start = $request->get('start_date');
+        $end = $request->get('end_date');
+        
+        // 這一行 SQL 的意思如下：
+             // 1. 從 order_d 資料表選取 ord_no（訂單編號）、prod_no（產品型號）、qty（數量）。
+             // 2. 對 subtype 欄位（子型號資訊）做字串處理：
+             //    - 先用 TRIM(BOTH '@' FROM d.subtype) 去除前後的 @ 字元（避免多餘分隔符號）。
+             //    - 再用 REPLACE(..., '@@', '@') 把連續的 @@ 取代成單一 @，確保分隔符號正確。
+             //    - 最後命名為 cleaned，表示已清理過的子型號字串。
+             // 3. 最後多選一個常數 1，命名為 idx，作為遞迴 CTE 的初始索引（用來分割子型號字串）。
+        $sql = "WITH RECURSIVE tok AS (\n"             
+             . "  SELECT d.ord_no, d.prod_no, d.qty, REPLACE(TRIM(BOTH '@' FROM d.subtype),'@@','@') AS cleaned, 1 AS idx\n"
+             . "  FROM order_d d\n"
+             . "  JOIN order_m m ON m.ord_no = d.ord_no\n"
+             . "  WHERE d.subtype IS NOT NULL AND d.subtype <> '' AND d.subtype <> '-1'\n"
+             . "    AND (d.prod_no = ? OR EXISTS (SELECT 1 FROM order_dd dd WHERE dd.ord_no = d.ord_no AND dd.detail_prod_no = ?))\n"
+             . "    AND m.order_kind NOT IN (98,99) AND m.cancel_flag = 0 AND m.io_kind IN (1,2)";
+        // 設定 SQL 綁定參數，初始只放入產品型號（兩次：主檔 prod_no 或細項 detail_prod_no）
+        $bindings = [$prodNo, $prodNo];
+
+        // 如果有指定開始或結束日期，則動態組合 SQL 條件
+        if (!empty($start) || !empty($end)) {
+            // 為了方便後續 AND 條件拼接，先加一個恆成立的 1=1
+            $sql .= " AND (1=1";
+            // 如果有開始日期，則加入訂單日期或建立日期大於等於開始日的條件
+            if (!empty($start)) {
+                $sql .= " AND (DATE(m.ord_date2) >= ? OR DATE(m.create_date) >= ?)";
+                // 將開始日期參數加入綁定陣列（兩次，分別對應 ord_date2 與 create_date）
+                $bindings[] = $start;
+                $bindings[] = $start;
+            }
+            // 如果有結束日期，則加入訂單日期或建立日期小於等於結束日的條件
+            if (!empty($end)) {
+                $sql .= " AND (DATE(m.ord_date2) <= ? OR DATE(m.create_date) <= ?)";
+                // 將結束日期參數加入綁定陣列（兩次，分別對應 ord_date2 與 create_date）
+                $bindings[] = $end;
+                $bindings[] = $end;
+            }
+            // 關閉 AND 條件的括號
+            $sql .= ")";
+        }
+        $sql .= "\n"
+             . "  UNION ALL\n"
+             . "  SELECT ord_no, prod_no, qty, cleaned, idx + 1\n"
+             . "  FROM tok\n"
+             . "  WHERE idx < 1 + LENGTH(cleaned) - LENGTH(REPLACE(cleaned,'@',''))\n"
+             . "), parsed AS (\n"
+             . "  SELECT ord_no, prod_no, qty, SUBSTRING_INDEX(SUBSTRING_INDEX(cleaned,'@', idx),'@',-1) AS token\n"
+             . "  FROM tok\n"
+             . "), split AS (\n"
+             . "  SELECT ord_no, prod_no, qty, CAST(SUBSTRING_INDEX(token,'_',1) AS UNSIGNED) AS sn, CAST(SUBSTRING_INDEX(token,'_',-1) AS UNSIGNED) AS sub_qty\n"
+             . "  FROM parsed WHERE token <> ''\n"
+             . ")\n"
+             . "SELECT s.sn, p.type_name, SUM(s.sub_qty * s.qty) AS new_qty\n"
+             . "FROM split s JOIN prod_subtype p ON p.sn = s.sn\n"
+             . "GROUP BY s.sn, p.type_name\n"
+             . "ORDER BY new_qty DESC";
+        //echo $sql;
+        $rows = DB::select($sql, $bindings);
+        if (strtolower((string)$request->get('format')) === 'json' || $request->wantsJson()) {
+            return response()->json([
+                'ok' => true,
+                'prodNo' => $prodNo,
+                'start' => $start,
+                'end' => $end,
+                'rows' => $rows,
+            ]);
+        }
+        return view('sales.subtype_breakdown', [
+            'prodNo' => $prodNo,
+            'rows' => $rows,
         ]);
     }
 
     public function monthly(Request $request)
-    {
+    {//每月銷售額彙總
         $start = $request->get('start_date');
         $end = $request->get('end_date');
 
@@ -117,7 +498,7 @@ class SalesReportController extends Controller
                 DB::raw('SUM(COALESCE(d.qty,0) * COALESCE(d.unit_pv,0)) AS total_pv'),
                 DB::raw('COUNT(DISTINCT m.ord_no) AS order_count'),
             ])
-            ->where('m.order_kind', '<>', '99')
+            ->whereNotIn('m.order_kind', ['98','99'])
             ->where('m.cancel_flag', 0)
             ->whereIn('m.io_kind', ['1', '2'])
             ->when($start, function ($q) use ($start) {
@@ -136,7 +517,7 @@ class SalesReportController extends Controller
         $cursor = strtotime(substr($start, 0, 10));
         $endTs = strtotime(substr($end, 0, 10));
         while ($cursor <= $endTs) {
-            $labels[] = date('Y-m', $cursor);
+            $labels[] = date('Y-m', $cursor);//圖形下面的字
             $cursor = strtotime('+1 month', $cursor);
         }
 
@@ -157,7 +538,7 @@ class SalesReportController extends Controller
                 DB::raw("DATE_FORMAT(m.create_date, '%Y-%m') AS ym"),
                 DB::raw('SUM(COALESCE(d.qty,0) * COALESCE(d.price,0)) AS total_amount'),
             ])
-            ->where('m.order_kind', '<>', '99')
+            ->whereNotIn('m.order_kind', ['98','99'])
             ->where('m.cancel_flag', 0)
             ->whereIn('m.io_kind', ['1', '2'])
             ->where('m.create_date', '>=', $prevStart . ' 00:00:00')
@@ -193,6 +574,7 @@ class SalesReportController extends Controller
 
     public function yearly(Request $request)
     {
+        //年度銷售額彙總
         // 讀取年度區間，若未提供則預設顯示近三年（含今年）
         $startYear = (int) ($request->get('start_year') ?: 2019);
         $endYear = (int) ($request->get('end_year') ?: date('Y'));
@@ -207,7 +589,7 @@ class SalesReportController extends Controller
                 DB::raw('YEAR(m.create_date) AS y'),
                 DB::raw('SUM(COALESCE(d.qty,0) * COALESCE(d.price,0)) AS total_amount'),
             ])
-            ->where('m.order_kind', '<>', '99')
+            ->whereNotIn('m.order_kind', ['98','99'])
             ->where('m.cancel_flag', 0)
             ->whereIn('m.io_kind', ['1', '2'])
             ->where('m.create_date', '>=', $startDate)
@@ -235,8 +617,11 @@ class SalesReportController extends Controller
 
     public function topMonthly(Request $request)
     {
+        //每月Top10產品
         $start = $request->get('start_date');
         $end = $request->get('end_date');
+        $byDetail = (bool) $request->get('by_detail', false);
+        $isChinese = false; // 此頁暫不提供關鍵字；若後續加入可沿用判斷
         $excluded = $this->excludedProdNos();
 
         if (!$start && !$end) {
@@ -244,29 +629,56 @@ class SalesReportController extends Controller
             $end = date('Y-m-d');
         }
 
-        $query = DB::table('order_m as m')
-            ->join('order_d as d', 'd.ord_no', '=', 'm.ord_no')
-            ->join('product_m as p', 'p.prod_no', '=', 'd.prod_no')
-            ->select([
-                DB::raw("DATE_FORMAT(m.create_date, '%Y-%m') AS ym"),
-                'p.prod_no',
-                'p.prod_name',
-                DB::raw('SUM(COALESCE(d.qty,0)) AS total_qty'),
-                DB::raw('SUM(COALESCE(d.qty,0) * COALESCE(d.price,0)) AS total_amount'),
-            ])
-            ->where('m.order_kind', '<>', '99')
-            ->where('m.cancel_flag', 0)
-            ->whereIn('m.io_kind', ['1', '2'])
-            ->whereNotIn('p.prod_no', $excluded)
-            ->when($start, function ($q) use ($start) {
-                $q->where('m.create_date', '>=', $start . ' 00:00:00');
-            })
-            ->when($end, function ($q) use ($end) {
-                $q->where('m.create_date', '<=', $end . ' 23:59:59');
-            })
-            ->groupBy(DB::raw("DATE_FORMAT(m.create_date, '%Y-%m')"), 'p.prod_no', 'p.prod_name')
-            ->orderBy('ym')
-            ->orderByRaw('SUM(COALESCE(d.qty,0)) DESC');
+        if ($byDetail) {
+            // 依細項商品：order_dd + order_m（不 join order_d）
+            $query = DB::table('order_dd as dd')
+                ->join('order_m as m', 'm.ord_no', '=', 'dd.ord_no')
+                ->leftJoin('product_m as pd', 'pd.prod_no', '=', 'dd.detail_prod_no')
+                ->select([
+                    DB::raw("DATE_FORMAT(m.create_date, '%Y-%m') AS ym"),
+                    DB::raw('dd.detail_prod_no as prod_no'),
+                    DB::raw('COALESCE(pd.prod_name, "") as prod_name'),
+                    DB::raw('SUM(COALESCE(dd.qty,0)) AS total_qty'),
+                    DB::raw('0 AS total_amount'),
+                ])
+                ->whereNotIn('m.order_kind', ['98','99'])
+                ->where('m.cancel_flag', 0)
+                ->whereIn('m.io_kind', ['1', '2'])
+                ->whereNotIn('dd.detail_prod_no', $excluded)
+                ->when($start, function ($q) use ($start) {
+                    $q->where('m.create_date', '>=', $start . ' 00:00:00');
+                })
+                ->when($end, function ($q) use ($end) {
+                    $q->where('m.create_date', '<=', $end . ' 23:59:59');
+                })
+                ->groupBy(DB::raw("DATE_FORMAT(m.create_date, '%Y-%m')"), 'dd.detail_prod_no', 'pd.prod_name')
+                ->orderBy('ym')
+                ->orderByRaw('SUM(COALESCE(dd.qty,0)) DESC');
+        } else {
+            $query = DB::table('order_m as m')
+                ->join('order_d as d', 'd.ord_no', '=', 'm.ord_no')
+                ->join('product_m as p', 'p.prod_no', '=', 'd.prod_no')
+                ->select([
+                    DB::raw("DATE_FORMAT(m.create_date, '%Y-%m') AS ym"),
+                    'p.prod_no',
+                    'p.prod_name',
+                    DB::raw('SUM(COALESCE(d.qty,0)) AS total_qty'),
+                    DB::raw('SUM(COALESCE(d.qty,0) * COALESCE(d.price,0)) AS total_amount'),
+                ])
+                ->whereNotIn('m.order_kind', ['98','99'])
+                ->where('m.cancel_flag', 0)
+                ->whereIn('m.io_kind', ['1', '2'])
+                ->whereNotIn('p.prod_no', $excluded)
+                ->when($start, function ($q) use ($start) {
+                    $q->where('m.create_date', '>=', $start . ' 00:00:00');
+                })
+                ->when($end, function ($q) use ($end) {
+                    $q->where('m.create_date', '<=', $end . ' 23:59:59');
+                })
+                ->groupBy(DB::raw("DATE_FORMAT(m.create_date, '%Y-%m')"), 'p.prod_no', 'p.prod_name')
+                ->orderBy('ym')
+                ->orderByRaw('SUM(COALESCE(d.qty,0)) DESC');
+        }
 
         $rows = $query->get();
 
@@ -298,10 +710,27 @@ class SalesReportController extends Controller
             }
         }
 
+        // 準備每月圖表資料（Top10 數量）
+        $chartByMonth = [];
+        foreach ($tops as $ym => $list) {
+            $labels = [];
+            $data = [];
+            foreach ($list as $row) {
+                $labels[] = $row->prod_no.'('.$row->prod_name.')';
+                $data[] = (int) $row->total_qty;
+            }
+            $chartByMonth[$ym] = [
+                'labels' => $labels,
+                'data' => $data,
+            ];
+        }
+
         return view('sales.top_monthly', [
             'rows' => $ranked,
             'start' => $start,
             'end' => $end,
+            'byDetail' => $byDetail,
+            'chartByMonth' => $chartByMonth,
         ]);
     }
 
@@ -345,7 +774,7 @@ class SalesReportController extends Controller
                 DB::raw('COUNT(DISTINCT m.ord_no) AS order_count'),
             ])
             // 訂單狀態過濾：排除非銷售/取消，僅統計銷出與退貨類別 1、2
-            ->where('m.order_kind', '<>', '99')
+            ->whereNotIn('m.order_kind', ['98','99'])
             //->where('m.cancel_flag', 0)
             ->whereIn('m.io_kind', ['1', '2'])
             // 店家過濾（依票券核銷店家編號）
@@ -395,7 +824,8 @@ class SalesReportController extends Controller
 
     public function productMonthly(Request $request)
     {
-        $keyword = trim($request->get('q', ''));        
+        $keyword = trim($request->get('q', ''));
+        $byDetail = (bool) $request->get('by_detail', false);        
         $excluded = $this->excludedProdNos();
 
         $start = $request->get('start_date');
@@ -406,44 +836,122 @@ class SalesReportController extends Controller
             $end = date('Y-m-d');
         }
 
-        $query = DB::table('order_m as m')
-            ->join('order_d as d', 'd.ord_no', '=', 'm.ord_no')
-            ->join('product_m as p', 'p.prod_no', '=', 'd.prod_no')
-            ->select([
-                'p.prod_no',
-                'p.prod_name',
-                DB::raw("DATE_FORMAT(m.create_date, '%Y-%m') AS ym"),
-                DB::raw('SUM(COALESCE(d.qty,0)) AS total_qty'),
-                DB::raw('SUM(COALESCE(d.qty,0) * COALESCE(d.price,0)) AS total_amount'),
-                DB::raw('SUM(COALESCE(d.qty,0) * COALESCE(d.unit_pv,0)) AS total_pv'),
-            ])
-            ->where('m.order_kind', '<>', '99')
-            ->where('m.cancel_flag', 0)
-            ->whereIn('m.io_kind', ['1', '2'])
-            ->whereNotIn('p.prod_no', $excluded)
-            ->when($start, function ($q) use ($start) {
-                $q->where('m.create_date', '>=', $start . ' 00:00:00');
-            })
-            ->when($end, function ($q) use ($end) {
-                $q->where('m.create_date', '<=', $end . ' 23:59:59');
-            })
-            ->when($keyword !== '', function ($q) use ($keyword) {
-                $q->where(function ($qq) use ($keyword) {
-                    $qq->where('p.prod_no', 'like', "%{$keyword}%")
-                       ->orWhere('p.prod_name', 'like', "%{$keyword}%");
-                });
-            })
-            ->groupBy('p.prod_no', 'p.prod_name', DB::raw("DATE_FORMAT(m.create_date, '%Y-%m')"))
-            ->orderBy('ym')
-            ->orderBy('p.prod_no');
+        if ($byDetail) {
+            // 依細項商品（order_dd.detail_prod_no）彙總數量 - 僅使用 order_dd + order_m
+            $query = DB::table('order_dd as dd')
+                ->join('order_m as m', 'm.ord_no', '=', 'dd.ord_no')
+                ->leftJoin('product_m as pd', 'pd.prod_no', '=', 'dd.detail_prod_no')
+                ->select([
+                    DB::raw('dd.detail_prod_no as prod_no'),
+                    DB::raw('COALESCE(pd.prod_name, "") as prod_name'),
+                    DB::raw("DATE_FORMAT(m.create_date, '%Y-%m') AS ym"),
+                    DB::raw('SUM(COALESCE(dd.qty,0)) AS total_qty'),
+                    DB::raw('0 AS total_amount'),
+                    DB::raw('0 AS total_pv'),
+                ])
+                ->whereNotIn('m.order_kind', ['98','99'])
+                ->where('m.cancel_flag', 0)
+                ->whereIn('m.io_kind', ['1', '2'])
+                ->whereNotIn('dd.detail_prod_no', $excluded)
+                ->when($start, function ($q) use ($start) {
+                    $q->where('m.create_date', '>=', $start . ' 00:00:00');
+                })
+                ->when($end, function ($q) use ($end) {
+                    $q->where('m.create_date', '<=', $end . ' 23:59:59');
+                })
+                ->when($keyword !== '', function ($q) use ($keyword) {
+                    $q->where(function ($qq) use ($keyword) {                        
+                        if ($this->hasChinese($keyword)) {
+                            $qq->orWhere('pd.prod_name', 'like', "%{$keyword}%");
+                        }
+                        else
+                        {
+                            $qq->where('dd.detail_prod_no', 'like', "%{$keyword}%");
+                        }
+                    });
+                })
+                ->groupBy(DB::raw("DATE_FORMAT(m.create_date, '%Y-%m')"), 'dd.detail_prod_no', 'pd.prod_name')
+                ->orderBy('ym')
+                ->orderBy('dd.detail_prod_no');
+        } else {
+            // 依主商品（order_d.prod_no）彙總
+            $query = DB::table('order_m as m')
+                ->join('order_d as d', 'd.ord_no', '=', 'm.ord_no')
+                ->join('product_m as p', 'p.prod_no', '=', 'd.prod_no')
+                ->select([
+                    'p.prod_no',
+                    'p.prod_name',
+                    DB::raw("DATE_FORMAT(m.create_date, '%Y-%m') AS ym"),
+                    DB::raw('SUM(COALESCE(d.qty,0)) AS total_qty'),
+                    DB::raw('SUM(COALESCE(d.qty,0) * COALESCE(d.price,0)) AS total_amount'),
+                    DB::raw('SUM(COALESCE(d.qty,0) * COALESCE(d.unit_pv,0)) AS total_pv'),
+                ])
+                ->whereNotIn('m.order_kind', ['98','99'])
+                ->where('m.cancel_flag', 0)
+                ->whereIn('m.io_kind', ['1', '2'])
+                ->whereNotIn('p.prod_no', $excluded)
+                ->when($start, function ($q) use ($start) {
+                    $q->where('m.create_date', '>=', $start . ' 00:00:00');
+                })
+                ->when($end, function ($q) use ($end) {
+                    $q->where('m.create_date', '<=', $end . ' 23:59:59');
+                })
+                ->when($keyword !== '', function ($q) use ($keyword) {
+                    $q->where(function ($qq) use ($keyword) {
+                        if ($this->hasChinese($keyword)) {
+                            $qq->orWhere('p.prod_name', 'like', "%{$keyword}%");
+                        }
+                        else
+                        {
+                            $qq->where('p.prod_no', 'like', "%{$keyword}%");
+                        }
+                    });
+                })
+                ->groupBy('p.prod_no', 'p.prod_name', DB::raw("DATE_FORMAT(m.create_date, '%Y-%m')"))
+                ->orderBy('ym')
+                ->orderBy('p.prod_no');
+        }
 
         $rows = $query->get();
+
+        // 準備圖表資料（目前區間內產品銷售數量橫條圖）— 取前 10 名（依數量）
+        $sumByProd = [];
+        foreach ($rows as $r) {
+            $prodNo = (string) ($r->prod_no ?? '');
+            if ($prodNo === '') continue;
+            if (!isset($sumByProd[$prodNo])) {
+                $sumByProd[$prodNo] = [
+                    'prod_no' => $prodNo,
+                    'prod_name' => (string) ($r->prod_name ?? ''),
+                    'qty' => 0.0,
+                ];
+            }
+            $sumByProd[$prodNo]['qty'] += (float) ($r->total_qty ?? 0);
+        }
+        // 轉為陣列並依數量由大到小排序
+        $aggList = array_values($sumByProd);
+        usort($aggList, function($a, $b){ return $b['qty'] <=> $a['qty']; });
+        // 取前 20 筆
+        $topList = array_slice($aggList, 0, 20);
+        $chartProdLabels = [];
+        $chartProdData = [];
+        $rank = 1;
+        foreach ($topList as $it) {
+            $labelBase = trim($it['prod_no'] . ($it['prod_name'] !== '' ? ('(' . $it['prod_name'] . ')') : ''));
+            $labelBase = $labelBase !== '' ? $labelBase : $it['prod_no'];
+            $chartProdLabels[] = $rank . '. ' . $labelBase;
+            $chartProdData[] = (float) $it['qty'];
+            $rank++;
+        }
 
         return view('sales.product_monthly', [
             'rows' => $rows,
             'keyword' => $keyword,
             'start' => $start,
             'end' => $end,
+            'byDetail' => $byDetail,
+            'chartProdLabels' => $chartProdLabels,
+            'chartProdData' => $chartProdData,
         ]);
     }
 
