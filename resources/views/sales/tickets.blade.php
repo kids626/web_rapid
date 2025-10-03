@@ -43,7 +43,7 @@
                         <label>日期欄位</label>
                         <select name="date_field" class="form-control">                    
                             <option value="create_time" {{ $dateField==='create_time' ? 'selected' : '' }}>票卷建立時間(create_time)</option>
-                            <!-- <option value="use_date" {{ $dateField==='use_date' ? 'selected' : '' }}>票券使用時間(use_date)</option> -->
+                            <option value="use_date" {{ $dateField==='use_date' ? 'selected' : '' }}>票券使用時間(use_date)</option>
                         </select>
                     </div>
                     <div class="col-md-3 mb-2">
@@ -191,7 +191,14 @@ $(function(){
     var $tbody = $('#usedListBody');
     $tbody.html('<tr><td colspan="11" class="text-center text-muted">載入中...</td></tr>');
     $('#usedModal').modal('show');
-    $.get("{{ route('sales.report.tickets.used_list') }}", { ym: ym, prod_no: prodNo, fac_no: $('select[name=\'fac_no\']').val() }, function(resp){
+    $.get("{{ route('sales.report.tickets.used_list') }}", {
+      ym: ym,
+      prod_no: prodNo,
+      fac_no: $('select[name=\'fac_no\']').val(),
+      date_field: $('select[name=\'date_field\']').val(),
+      start_date: $('input[name=\'start_date\']').val(),
+      end_date: $('input[name=\'end_date\']').val()
+    }, function(resp){
       var rows = resp.data || [];
       if (!rows.length) {
         $tbody.html('<tr><td colspan="11" class="text-center text-muted">查無資料</td></tr>');
@@ -213,6 +220,15 @@ $(function(){
                '</tr>';
       }).join('');
       $tbody.html(html);
+      // 依目前日期欄位決定是否將 use_date 欄位標紅
+      var isUseDate = $('select[name=\'date_field\']').val() === 'use_date';
+      var $modal = $('#usedModal');
+      // 表頭第 11 欄（0-based index 10）
+      $modal.find('thead th').eq(10).toggleClass('text-danger', isUseDate);
+      // 每列第 11 欄
+      $modal.find('tbody tr').each(function(){
+        $(this).find('td').eq(10).toggleClass('text-danger', isUseDate);
+      });
     });
   });
 
@@ -223,7 +239,14 @@ $(function(){
     var $tbody = $('#notUsedListBody');
     $tbody.html('<tr><td colspan="11" class="text-center text-muted">載入中...</td></tr>');
     $('#notUsedModal').modal('show');
-    $.get("{{ route('sales.report.tickets.not_used_list') }}", { ym: ym, prod_no: prodNo, fac_no: $('select[name=\'fac_no\']').val() }, function(resp){
+    $.get("{{ route('sales.report.tickets.not_used_list') }}", {
+      ym: ym,
+      prod_no: prodNo,
+      fac_no: $('select[name=\'fac_no\']').val(),
+      date_field: $('select[name=\'date_field\']').val(),
+      start_date: $('input[name=\'start_date\']').val(),
+      end_date: $('input[name=\'end_date\']').val()
+    }, function(resp){
       var rows = resp.data || [];
       if (!rows.length) {
         $tbody.html('<tr><td colspan="11" class="text-center text-muted">查無資料</td></tr>');

@@ -749,7 +749,9 @@ class SalesReportController extends Controller
         $dateField = $dateField === 'create_time' ? 'create_time' : 'use_date';
 
         // 以所選日期欄位建立 STR_TO_DATE 表達式，便於做區間與年月彙總
-        $dateExpr = "STR_TO_DATE(t." . $dateField . ", '%Y-%m-%d %H:%i:%s')";
+        $dateExpr = $dateField === 'use_date'
+            ? "FROM_UNIXTIME(t.use_date)"
+            : "STR_TO_DATE(t.create_time, '%Y-%m-%d %H:%i:%s')";
 
         // 建立查詢：自 ticket t 出發，連接訂單主檔 m 與產品檔 p
         $query = DB::table('ticket as t')
@@ -956,19 +958,48 @@ class SalesReportController extends Controller
     }
 
     public function ticketUsedList(Request $request)
-    {
+    {//已用票券清單
         $ym = $request->get('ym');
         $prodNo = $request->get('prod_no');
         $facNo = $request->get('fac_no');
+        $sd = $request->get('start_date');
+        $ed = $request->get('end_date');
+        $dateField = $request->get('date_field', 'use_date');
 
-        if (!$ym || !$prodNo) {
+        if (!$prodNo) {
             return response()->json(['data' => []]);
         }
 
-        // 對應月份區間
-        $start = $ym . '-01 00:00:00';
-        // 取該月最後一天
-        $end = date('Y-m-t 23:59:59', strtotime($ym . '-01'));
+        // 區間：若提供 start/end 則優先；否則回退 ym 月份
+        if (!empty($sd) || !empty($ed)) {
+            if (empty($sd) && !empty($ym)) {
+                $sd = $ym . '-01';
+            }
+            if (empty($ed) && !empty($ym)) {
+                $ed = date('Y-m-t', strtotime($ym . '-01'));
+            }
+            // 依 date_field 轉換區間：use_date 用 Unix 秒，create_time 用日期字串
+            if ($dateField === 'create_time') {
+                $startStr = !empty($sd) ? ($sd . ' 00:00:00') : '1970-01-01 00:00:00';
+                $endStr = !empty($ed) ? ($ed . ' 23:59:59') : date('Y-m-d 23:59:59');
+            } else {
+                $startTs = !empty($sd) ? strtotime($sd . ' 00:00:00') : strtotime('1970-01-01 00:00:00');
+                $endTs = !empty($ed) ? strtotime($ed . ' 23:59:59') : time();
+            }
+        } else {
+            if (empty($ym)) {
+                return response()->json(['data' => []]);
+            }
+            $start = $ym . '-01 00:00:00';
+            $end = date('Y-m-t 23:59:59', strtotime($ym . '-01'));
+            if ($dateField === 'create_time') {
+                $startStr = $start;
+                $endStr = $end;
+            } else {
+                $startTs = strtotime($start);
+                $endTs = strtotime($end);
+            }
+        }
 
         $query = DB::table('ticket as t')
             ->join('order_m as m', 'm.ord_no', '=', 't.ord_no')
@@ -976,7 +1007,6 @@ class SalesReportController extends Controller
             ->leftJoin('product_m as p', 'p.prod_no', '=', 't.prod_no')
             ->where('t.status', '1')
             ->where('t.prod_no', $prodNo)
-            ->whereBetween(DB::raw("STR_TO_DATE(t.create_time, '%Y-%m-%d %H:%i:%s')"), [$start, $end])
             ->when(!empty($facNo), function($q) use ($facNo) {
                 $q->where('t.check_fac_no', $facNo);
             })
@@ -993,6 +1023,13 @@ class SalesReportController extends Controller
                 DB::raw('p.prod_name as prod_name'),
             ])
             ->orderBy('s.store_name');
+
+        // 依 date_field 套用區間條件（避免閉包捕捉未定義變數）
+        if ($dateField === 'create_time') {
+            $query->whereBetween(DB::raw("STR_TO_DATE(t.create_time, '%Y-%m-%d %H:%i:%s')"), [$startStr, $endStr]);
+        } else {
+            $query->whereBetween('t.use_date', [$startTs, $endTs]);
+        }
         //ddSql($query);    
         $rows = $query->get();    
         
@@ -1000,18 +1037,34 @@ class SalesReportController extends Controller
     }
 
     public function ticketNotUsedList(Request $request)
-    {
+    {//未用票券清單
         $ym = $request->get('ym');
         $prodNo = $request->get('prod_no');
         $facNo = $request->get('fac_no');
+        $sd = $request->get('start_date');
+        $ed = $request->get('end_date');
 
-        if (!$ym || !$prodNo) {
+        if (!$prodNo) {
             return response()->json(['data' => []]);
         }
 
-        // 對應月份區間（用建立時間作為參考，未使用沒有 use_date）
-        $start = $ym . '-01 00:00:00';
-        $end = date('Y-m-t 23:59:59', strtotime($ym . '-01'));
+        // 區間：若提供 start/end 則優先；否則回退 ym 月份（未使用沒有 use_date）
+        if (!empty($sd) || !empty($ed)) {
+            if (empty($sd) && !empty($ym)) {
+                $sd = $ym . '-01';
+            }
+            if (empty($ed) && !empty($ym)) {
+                $ed = date('Y-m-t', strtotime($ym . '-01'));
+            }
+            $start = !empty($sd) ? ($sd . ' 00:00:00') : '1970-01-01 00:00:00';
+            $end = !empty($ed) ? ($ed . ' 23:59:59') : date('Y-m-d 23:59:59');
+        } else {
+            if (empty($ym)) {
+                return response()->json(['data' => []]);
+            }
+            $start = $ym . '-01 00:00:00';
+            $end = date('Y-m-t 23:59:59', strtotime($ym . '-01'));
+        }
 
         $query = DB::table('ticket as t')
             ->join('order_m as m', 'm.ord_no', '=', 't.ord_no')
