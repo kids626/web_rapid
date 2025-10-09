@@ -99,6 +99,8 @@
             </tbody>
         </table>
     </div>
+    <!-- 查詢上下文（以最後一次按下查詢送出的參數為主） -->
+    <div id="ticketsQueryCtx" data-date-field="{{ $dateField }}" data-start="{{ $start }}" data-end="{{ $end }}" data-fac="{{ $facNo }}" style="display:none"></div>
 <!-- Modal -->
 <div class="modal fade" id="usedModal" tabindex="-1" role="dialog" aria-hidden="true">
   <div class="modal-dialog modal-xl" role="document">
@@ -191,13 +193,18 @@ $(function(){
     var $tbody = $('#usedListBody');
     $tbody.html('<tr><td colspan="11" class="text-center text-muted">載入中...</td></tr>');
     $('#usedModal').modal('show');
+    var ctx = document.getElementById('ticketsQueryCtx');
+    var ctxDateField = ctx ? (ctx.dataset.dateField || '') : '';
+    var ctxStart = ctx ? (ctx.dataset.start || '') : '';
+    var ctxEnd = ctx ? (ctx.dataset.end || '') : '';
+    var ctxFac = ctx ? (ctx.dataset.fac || '') : '';
     $.get("{{ route('sales.report.tickets.used_list') }}", {
       ym: ym,
       prod_no: prodNo,
-      fac_no: $('select[name=\'fac_no\']').val(),
-      date_field: $('select[name=\'date_field\']').val(),
-      start_date: $('input[name=\'start_date\']').val(),
-      end_date: $('input[name=\'end_date\']').val()
+      fac_no: ctxFac,
+      date_field: ctxDateField,
+      start_date: ctxStart,
+      end_date: ctxEnd
     }, function(resp){
       var rows = resp.data || [];
       if (!rows.length) {
@@ -220,8 +227,8 @@ $(function(){
                '</tr>';
       }).join('');
       $tbody.html(html);
-      // 依目前日期欄位決定是否將 use_date 欄位標紅
-      var isUseDate = $('select[name=\'date_field\']').val() === 'use_date';
+      // 依查詢上下文日期欄位決定是否將 use_date 欄位標紅（以按下查詢為主）
+      var isUseDate = ctxDateField === 'use_date';
       var $modal = $('#usedModal');
       // 表頭第 11 欄（0-based index 10）
       $modal.find('thead th').eq(10).toggleClass('text-danger', isUseDate);
@@ -239,13 +246,18 @@ $(function(){
     var $tbody = $('#notUsedListBody');
     $tbody.html('<tr><td colspan="11" class="text-center text-muted">載入中...</td></tr>');
     $('#notUsedModal').modal('show');
+    var ctx = document.getElementById('ticketsQueryCtx');
+    var ctxDateField = ctx ? (ctx.dataset.dateField || '') : '';
+    var ctxStart = ctx ? (ctx.dataset.start || '') : '';
+    var ctxEnd = ctx ? (ctx.dataset.end || '') : '';
+    var ctxFac = ctx ? (ctx.dataset.fac || '') : '';
     $.get("{{ route('sales.report.tickets.not_used_list') }}", {
       ym: ym,
       prod_no: prodNo,
-      fac_no: $('select[name=\'fac_no\']').val(),
-      date_field: $('select[name=\'date_field\']').val(),
-      start_date: $('input[name=\'start_date\']').val(),
-      end_date: $('input[name=\'end_date\']').val()
+      fac_no: ctxFac,
+      date_field: ctxDateField,
+      start_date: ctxStart,
+      end_date: ctxEnd
     }, function(resp){
       var rows = resp.data || [];
       if (!rows.length) {
